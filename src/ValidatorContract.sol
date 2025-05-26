@@ -132,6 +132,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //    FUNCTIONS: NON-View
     //
 
+    /**
+     * @notice Locks a license for validator
+     * @param  tokenId - ID of the license
+     */
     function lockLicense(uint256 tokenId) external {
         Main storage $ = _getMainStorage();
         $.license.transferFrom(msg.sender, address(this), tokenId);
@@ -163,6 +167,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit LicenseLocked(msg.sender, tokenId);
     }
 
+    /**
+     * @notice Unlocks a license for a validator
+     * @param  tokenId - ID of the license
+     */
     function unlockLicense(uint256 tokenId) external {
         Main storage $ = _getMainStorage();
 
@@ -174,7 +182,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         if (block.timestamp > lockedAt) timePassed = block.timestamp - lockedAt;
         else timePassed = 0;
 
-        if (timePassed < $.epochData.epochDuration)revert UnlockCooldown();
+        if (timePassed < epochDuration()) revert UnlockCooldown();
 
         // update locks 
         set.lockedAt[tokenId] = 0;
@@ -200,6 +208,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit LicenseUnlocked(msg.sender, tokenId);
     }
 
+    /**
+     * @notice Claims pending rewards
+     */
     function claim() external {
         Main storage $ = _getMainStorage();
 
@@ -222,6 +233,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //    FUNCTIONS: ADMIN & Roles
     //
 
+    /**
+     * @notice Ends the current epoch & distributes rewards
+     * @dev    Caution! Gas-heavy
+     */
     function endEpoch() external onlyRole(ADMIN) {
         Main storage $ = _getMainStorage();
         uint256 epoch = nowEpoch();
@@ -259,6 +274,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit EpochEnded(epoch);
     }
 
+    /**
+     * @notice Set first epoch reward
+     * @param  _firstEpochReward - First epoch reward
+     * @param  _start - First epoch start timestamp
+     */
     function setRewardAndStart(
         uint256 _firstEpochReward,
         uint256 _start
@@ -268,7 +288,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
         Main storage $ = _getMainStorage();
         // check duration is already set to prevent instant unlock
-        if ($.epochData.epochDuration == 0) {
+        if (epochDuration() == 0) {
             revert DurationNotSet();
         }
 
@@ -280,6 +300,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         $.epochData.firstEpochReward = _firstEpochReward;
     }
 
+    /**
+     * @notice Set decrease percent for each next epoch
+     * @param _decreasePercent - new decrease percent from 1 to 10_000 
+     */
     function setDecreasePercent(
         uint256 _decreasePercent
     ) external onlyRole(SETTER) {
@@ -309,6 +333,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit EpochDurationSet(_epochDuration);
     }
 
+    /**
+     * @notice Set reward token
+     * @dev    Reward token must be ERC20-compatible
+     * @param  token - new reward token
+     */
     function setRewardToken(
         address token
     ) external onlyRole(SETTER) {
@@ -316,6 +345,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         $.rewardToken = IERC20(token);
     }
 
+    /**
+     * @notice Set license
+     * @dev    License must be ERC721-compatible
+     * @param  license - new license address
+     */
     function setLicense(
         address license
     ) external onlyRole(SETTER) {
@@ -344,10 +378,14 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         else return (initial * (MAX_PERCENT - $.decreasePercent) ** epoch) / (MAX_PERCENT ** epoch);
     }
 
+    /**
+     * @notice Get current epoch
+     * @return current epoch number
+     */
     function nowEpoch() public view returns (uint256) {
         Main storage $ = _getMainStorage();
         uint256 start = $.epochData.firstEpochStart;
-        uint256 duration = $.epochData.epochDuration;
+        uint256 duration = epochDuration();
         if (start > block.timestamp) {
             return 0;
         } else {
@@ -355,38 +393,64 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
+    /**
+     * @notice Get epoch duration
+     * @return epoch duration in seconds
+     */
     function epochDuration() public view returns (uint256) {
         Main storage $ = _getMainStorage();
         return $.epochData.epochDuration;
     }
 
+    /** 
+     * @notice Get current full rewards per epoch
+     * @return reward per second
+     */
     function currentFullRewards() public view returns (uint256) {
         return epochRewards(nowEpoch());
     }
 
+    /**
+     * @notice Get current reward per second
+     * @return reward per second
+     */
     function currentRewardPerSecond() public view returns (uint256) {
         return rewardPerSecond(nowEpoch());
     }
 
+    /** 
+     * @notice Get epoch reward per second
+     * @param  epoch - epoch number
+     * @return pending rewards
+     */
     function rewardPerSecond(
         uint256 epoch
     ) public view returns (uint256) {
-        Main storage $ = _getMainStorage();
-        return epochRewards(epoch) / $.epochData.epochDuration;
+        return epochRewards(epoch) / epochDuration();
     }
 
+    /**
+     * @notice Get time passed from start of current epoch
+     * @return time passed in seconds
+     */
     function currentEpochTimePassed() public view returns (uint256) {
         return epochTimePassed(nowEpoch());
     }
 
+    /**
+     * @notice Get time passed in epoch
+     * @param  epoch - epoch number
+     * @return time left in seconds
+     */
     function epochTimePassed(
         uint256 epoch
     ) public view returns(uint256) {
         Main storage $ = _getMainStorage();
 
-        uint256 start = $.epochData.firstEpochStart + epoch * $.epochData.epochDuration;
-        if (block.timestamp > start + $.epochData.epochDuration) {
-            return $.epochData.epochDuration;
+        uint256 duration = epochDuration();
+        uint256 start = $.epochData.firstEpochStart + epoch * duration;
+        if (block.timestamp > start + duration) {
+            return duration;
         } else if (block.timestamp < start) {
             return 0;
         } else {
@@ -394,13 +458,22 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
+    /**
+     * @notice Get time left in epoch
+     * @param  epoch - epoch number
+     * @return time left in seconds
+     */
     function epochTimeLeft(
         uint256 epoch
     ) public view returns(uint256) {
-        Main storage $ = _getMainStorage();
-        return $.epochData.epochDuration - epochTimePassed(epoch);
+        return epochDuration() - epochTimePassed(epoch);
     }
 
+    /**
+     * @notice Get pending epoch rewards
+     * @param  epoch - epoch number
+     * @return pending rewards
+     */
     function pendingEpochRewards(
         uint256 epoch
     ) public view returns (uint256) {
@@ -415,6 +488,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
+    /**
+     * @notice Get total pending rewards
+     * @dev    Can be a sum of two or more epochs
+     * @return total pending rewards
+     */
     function pendingPoolRewards() public view returns (uint256) {
         Main storage $ = _getMainStorage();
         uint256 lastSeen = $.epochData.lastEpochSeen;
@@ -428,6 +506,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return totalPending;
     }
 
+    /**
+     * @notice Get pending rewards for validator
+     * @param  validator - address of validator
+     * @return pending rewards
+     */
     function validatorPendingRewards(
         address validator
     ) public view returns (uint256) {
@@ -465,6 +548,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return pendingRaw - position.rewardDebt + accumulatedReward;
     }
 
+    /**
+     * @notice Get validator locked licenses share
+     * @param  validator - address of validator
+     * @return validator share
+     */
     function getValidatorShare(
         address validator
     ) public view returns (uint256) {
@@ -473,9 +561,14 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return locked * MAX_PERCENT / $.rewardsData.totalLocked;
     }
 
+    /**
+     * @dev Get validator rewardDebt
+     * @param  validator - address of validator
+     * @return validator rewardDebt
+     */
     function getRewardDebt(
         address validator
-    ) external view returns (uint256) {
+    ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         return $.rewardsData.position[validator].rewardDebt;
     }
@@ -498,7 +591,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         position.rewardDebt = _getPendingRaw(validator);
     }
 
-
+    /**
+     * @dev Update RPS based on pending rewards
+     */
     function _updateRPS(Main storage $) private {
         uint256 newTotalLock = $.rewardsData.totalLocked;
         uint256 pending = pendingPoolRewards();
@@ -519,22 +614,40 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //    GETTERS
     //
 
+    /**
+     * @notice Get total locked licenses
+     * @return total locked
+     */
     function getTotalLocked() public view returns(uint256) {
         Main storage $ = _getMainStorage();
         return $.rewardsData.totalLocked;
     }
 
+    /**
+     * @notice Get number of validator locked licenses
+     * @param  validator - address of validator
+     * @return number of licenses locked
+     */
     function getValidatorLocked(address validator) public view returns(uint256) {
         Main storage $ = _getMainStorage();
         TokenSet storage tset = $.validatorInfo.licenseInfo[validator];
         return tset.ids.length;
     }
 
+    /**
+     * @notice Get number of validators, who locked licenses
+     * @return number of validators
+     */
     function getValidatorCount() external view returns(uint256) {
         Main storage $ = _getMainStorage();
         return $.validatorInfo.validators.length;
     }
 
+    /**
+      * @dev Get rewards used for RPS calculation in epoch
+      * @param  epoch - epoch
+      * @return rewards used
+      */
     function rewardsUsed(
         uint256 epoch
     ) external view returns(uint256) {
@@ -542,6 +655,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return $.rewardsData.epochRewards[epoch].rewardsUsed;
     }
 
+    /**
+      * @dev Get rewards claimed in epoch
+      * @param  epoch - epoch
+      * @return rewards given
+      */
     function rewardsGiven(
         uint256 epoch
     ) external view returns(uint256) {
@@ -549,6 +667,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return $.rewardsData.epochRewards[epoch].rewardsGiven;
     }
 
+    /**
+      * @dev Get total rewards given
+      * @return total rewards given
+      */
     function totalRewardsGiven() external view returns(uint256) {
         Main storage $ = _getMainStorage();
         return $.rewardsData.totalRewardsGiven;
