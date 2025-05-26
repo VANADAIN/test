@@ -210,6 +210,13 @@ contract ValidatorContractTest is Test {
         balance = rt.balanceOf(v1);
         assertEq(balance, pending);
 
+        uint256 given = vc.rewardsGiven(vc.nowEpoch());
+        uint256 totalGiven = vc.totalRewardsGiven();
+        assertNotEq(given, 0);
+        assertNotEq(totalGiven, 0);
+        assertEq(given, pending);
+        assertEq(totalGiven, given);
+
         // rewards to zero after claim (discrete) 
         pending = vc.validatorPendingRewards(v1);
         assertEq(pending, 0);
@@ -227,18 +234,13 @@ contract ValidatorContractTest is Test {
         skip(5 minutes);
 
         uint256 pendingV1 = vc.validatorPendingRewards(v1);
-        uint256 pendingV1Raw = vc.validatorPendingRewardsRaw(v1);
         assertNotEq(pendingV1, 0);
 
         pendingV2 = vc.validatorPendingRewards(v2);
         assertNotEq(pendingV2, 0);
 
-        uint256 v1debt = vc.getRewardDebt(v1);
-        uint256 v2debt = vc.getRewardDebt(v2);
-
         // same share but v2 locked later
         assertGt(pendingV1, pendingV2);
-
 
         // claim does not affect second user
         vm.prank(v1);
@@ -263,16 +265,21 @@ contract ValidatorContractTest is Test {
 
         uint256 pendingV1 = vc.validatorPendingRewards(v1);
         uint256 pendingV2 = vc.validatorPendingRewards(v2);
+        assertNotEq(pendingV1, 0);
+        assertNotEq(pendingV2, 0);
 
         uint256 epoch = vc.nowEpoch();
+        vm.expectEmit(address(vc));
+        emit ValidatorContract.EpochEnded(epoch);
         vc.endEpoch();
 
         assertEq(vc.nowEpoch(), epoch);
         assertEq(vc.epochTimePassed(epoch + 1), 0);
 
-
         uint256 rewardsUsed = vc.rewardsUsed(epoch);
         uint256 rewardsGiven = vc.rewardsGiven(epoch);
+        console.log('rewardsUsed', rewardsUsed);
+        console.log('rewardsGiven', rewardsGiven);
 
         uint256 pendingV1new = vc.validatorPendingRewards(v1);
         uint256 pendingV2new = vc.validatorPendingRewards(v2);
