@@ -24,12 +24,12 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //
 
     error LicenseNotLocked(address user, uint256 tokenId);
-    error DurationNotSet();
-    error InvalidStart(uint256 start);
     error InvalidPercent(uint256 percent);
+    error InvalidStart(uint256 start);
+    error DurationNotSet();
     error UnlockCooldown();
-    error AtTheEnd();
     error NoValidators();
+    error AtTheEnd();
 
     //
     //    EVENTS
@@ -37,11 +37,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
     event LicenseLocked(address from, uint256 licenseId);
     event LicenseUnlocked(address to, uint256 licenseId);
-
+    event Claimed(address user, uint256 amount);
     event DecreasePercentSet(uint256 percent);
     event EpochDurationSet(uint256 duration);
-
-    event Claimed(address user, uint256 amount);
+    event EpochEnded(uint256 epoch);
 
     //
     //    CONSTANTS
@@ -91,7 +90,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     struct RewardsData {
         uint256 RPS;
         uint256 totalLocked;
-        uint256 totalRewardsUsed;
         uint256 totalRewardsGiven;
         mapping(uint256 epoch => EpochRewards) epochRewards;
         mapping(address validator => Position) position;
@@ -145,8 +143,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Position storage position = $.rewardsData.position[msg.sender];
         position.accumulated += validatorPendingRewardsRaw(msg.sender);
 
-
-        // if validator is not in set -> add 
         if ($.validatorInfo.licenseInfo[msg.sender].ids.length == 0) {
             ValidatorSet storage vset = $.validatorInfo;
             vset.validators.push(msg.sender);
@@ -211,6 +207,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         $.rewardsData.totalLocked -= 1;
 
         $.license.transferFrom(address(this), msg.sender, tokenId);
+        $.epochData.lastEpochSeen = nowEpoch();
 
         emit LicenseUnlocked(msg.sender, tokenId);
     }
@@ -226,6 +223,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
         _updatePosition(msg.sender);
 
+        $.rewardsData.position[msg.sender].accumulated = 0;
+
+        $.rewardsData.epochRewards[nowEpoch()].rewardsGiven += pending;
         $.rewardsData.totalRewardsGiven += pending;
 
         emit Claimed(msg.sender, pending);
@@ -239,7 +239,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Main storage $ = _getMainStorage();
         uint256 epoch = nowEpoch();
         uint256 timeLeft = epochTimeLeft(epoch);
-
         if (timeLeft == 0) {
             revert AtTheEnd();
         }
@@ -256,14 +255,22 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
 
         _updateRPS($);
+        uint256 claimed;
         for (uint256 i = 0; i < len; i++) {
             uint256 pending = validatorPendingRewardsRaw(validators[i]);
             if (pending > 0) {
                 $.rewardToken.transfer(validators[i], pending);
                 _updatePosition(validators[i]);
+                claimed += pending;
                 emit Claimed(validators[i], pending);
             }
         }
+
+        $.epochData.lastEpochSeen = epoch;
+        $.rewardsData.epochRewards[nowEpoch()].rewardsGiven += claimed;
+        $.rewardsData.totalRewardsGiven += claimed;
+
+        emit EpochEnded(epoch);
     }
 
     function setRewardAndStart(
@@ -372,7 +379,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     }
 
     function currentRewardPerSecond() public view returns (uint256) {
-        Main storage $ = _getMainStorage();
         return rewardPerSecond(nowEpoch());
     }
 
@@ -416,13 +422,10 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Main storage $ = _getMainStorage();
         EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
 
-        uint256 perSec = rewardPerSecond(epoch);
         uint256 time = epochTimePassed(epoch);
         if (time == 0) {
             return 0;
-        }
-
-        if (perSec * time > rewardsData.rewardsUsed) {
+        } else {
             return rewardPerSecond(epoch) * epochTimePassed(epoch) - rewardsData.rewardsUsed;
         }
     }
@@ -449,7 +452,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 totalLock = $.rewardsData.totalLocked;
         uint256 pending = pendingPoolRewards();
         uint256 rewardPerShareChange = (pending * SHARE_DENOM) / totalLock;
-
         uint256 newRPS = $.rewardsData.RPS;
         if (rewardPerShareChange > 0) {
             newRPS += rewardPerShareChange;
@@ -457,7 +459,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
         Position storage position = $.rewardsData.position[validator];
         uint256 raw = (getValidatorShare(validator) * newRPS) / (SHARE_DENOM * MAX_PERCENT);
-
         uint256 accumulatedReward = position.accumulated;
 
         if (raw <= position.rewardDebt) {
@@ -564,10 +565,13 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 epoch
     ) external view returns(uint256) {
         Main storage $ = _getMainStorage();
-        EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
-        return rewardsData.rewardsGiven;
+        return $.rewardsData.epochRewards[epoch].rewardsGiven;
     }
 
+    function totalRewardsGiven() external view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        return $.rewardsData.totalRewardsGiven;
+    }
 
     //
     //    UTILS
