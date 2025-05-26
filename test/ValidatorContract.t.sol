@@ -41,8 +41,8 @@ contract ValidatorContractTest is Test {
         vc.setLicense(address(l));
         vc.setEpochDuration(1 hours);
         vc.setDecreasePercent(1000); // 10%
-        vc.setRewardAndStart(10_000 * 1e18, block.timestamp + 1);
-
+        vc.setRewardAndStart(10_000 * 1e18, block.timestamp + 10_000);
+        skip(10_000);
 
 
         // create validators
@@ -84,11 +84,9 @@ contract ValidatorContractTest is Test {
 
         uint256 expected = epochRewards / vc.epochDuration();
         epochRewards = vc.currentRewardPerSecond();
-        console.log("current rewards per second: ", epochRewards);
         assertEq(epochRewards, expected);
 
         uint256 timeP = vc.currentEpochTimePassed();
-        console.log("time passed: ", timeP);
         assertEq(timeP, 60);
 
 
@@ -96,7 +94,6 @@ contract ValidatorContractTest is Test {
         assertEq(timeP, 0);
 
         epochRewards = vc.pendingEpochRewards(epoch);
-        console.log("pending now: ", epochRewards);
         expected = (10_000 * 1e18);
         expected = expected / 60;
         /// !!! division rounding
@@ -104,7 +101,6 @@ contract ValidatorContractTest is Test {
         assertNotEq(epochRewards, 0);
 
         epochRewards = vc.pendingPoolRewards();
-        console.log("POOL: ", epochRewards);
         assertEq(epochRewards, vc.pendingEpochRewards(epoch));
 
         epochRewards = vc.pendingEpochRewards(epoch + 1);
@@ -115,9 +111,6 @@ contract ValidatorContractTest is Test {
         // pool now != epoch, bcz 2 epochs
         uint256 epochPending = vc.pendingEpochRewards(epoch + 1);
         uint256 poolRewards = vc.pendingPoolRewards();
-        console.log("NOW");
-        console.log("POOL: ", poolRewards);
-        console.log("PENDING: ", epochPending);
 
         assertNotEq(poolRewards, epochPending);
         assertGt(poolRewards, epochPending);
@@ -155,13 +148,11 @@ contract ValidatorContractTest is Test {
         skip(1 minutes);
 
         uint256 pending = vc.validatorPendingRewards(v1);
-        console.log("pending v1: ", pending);
         assertNotEq(pending, 0);
 
         skip(1 minutes); 
 
         uint256 pendingNew = vc.validatorPendingRewards(v1);
-        console.log("pending v1 new: ", pendingNew);
         assertNotEq(pendingNew, 0);
         assertGt(pendingNew, pending);
     }
@@ -213,13 +204,11 @@ contract ValidatorContractTest is Test {
 
         vm.expectEmit(address(vc));
         emit ValidatorContract.Claimed(address(v1), pending);
-        console.log('pending to claim', pending);
         vc.claim();
         vm.stopPrank();
 
         balance = rt.balanceOf(v1);
         assertEq(balance, pending);
-        console.log('balance after claim:', balance);
 
         // rewards to zero after claim (discrete) 
         pending = vc.validatorPendingRewards(v1);
@@ -248,8 +237,6 @@ contract ValidatorContractTest is Test {
         uint256 v2debt = vc.getRewardDebt(v2);
 
         // same share but v2 locked later
-        console.log("pending v1: ", pendingV1);
-        console.log("pending v2: ", pendingV2);
         assertGt(pendingV1, pendingV2);
 
 
@@ -259,16 +246,41 @@ contract ValidatorContractTest is Test {
 
         uint256 balance = rt.balanceOf(v1);
         assertEq(balance, pendingV1);
-        console.log("balance v1 claimed: ", balance);
 
         uint256 pendingV1new = vc.validatorPendingRewards(v1);
         assertEq(pendingV1new, 0);
 
-
         // does not affect second user
         uint256 pendingV2new = vc.validatorPendingRewards(v2);
-        console.log("pending v2 new: ", pendingV2new);
         assertNotEq(pendingV2new, 0);
         assertEq(pendingV2, pendingV2new);
+    }
+
+    function test_endEpoch() public {
+        vxLock(v1, 0);
+        vxLock(v2, 3);
+        skip(30 minutes);
+
+        uint256 pendingV1 = vc.validatorPendingRewards(v1);
+        uint256 pendingV2 = vc.validatorPendingRewards(v2);
+
+        uint256 epoch = vc.nowEpoch();
+        vc.endEpoch();
+
+        assertEq(vc.nowEpoch(), epoch);
+        assertEq(vc.epochTimePassed(epoch + 1), 0);
+
+
+        uint256 rewardsUsed = vc.rewardsUsed(epoch);
+        uint256 rewardsGiven = vc.rewardsGiven(epoch);
+
+        uint256 pendingV1new = vc.validatorPendingRewards(v1);
+        uint256 pendingV2new = vc.validatorPendingRewards(v2);
+
+        assertEq(pendingV1new, 0);
+        assertEq(pendingV2new, 0);
+
+        assertApproxEqRel(rt.balanceOf(v1), 5_000 * 1e18, 1 * 1e18);
+        assertApproxEqRel(rt.balanceOf(v2), 5_000 * 1e18, 1 * 1e18);
     }
 }
