@@ -9,6 +9,8 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {NonZeroLib} from "./lib/NonZeroLib.sol";
 
+import {console} from "forge-std/console.sol";
+
 /**
  * @title  Validator Contract
  * @notice Smart-contract for managing validator's licenses and rewards
@@ -37,6 +39,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     event DecreasePercentSet(uint256 percent);
     event EpochDurationSet(uint256 duration);
 
+    event Claimed(address user, uint256 amount);
+
     //
     //    CONSTANTS
     //
@@ -54,6 +58,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //
     //    STORAGE
     //
+
     struct TokenSet {
         uint256[] ids;
         mapping(uint256 tokenId => uint256) lockedAt;
@@ -131,20 +136,19 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Main storage $ = _getMainStorage();
         $.license.transferFrom(msg.sender, address(this), tokenId);
 
+        // update pool info 
+        $.rewardsData.totalLocked += 1;
 
         // accumulate position rewards
         Position storage position = $.rewardsData.position[msg.sender];
         position.accumulated += validatorPendingRewardsRaw(msg.sender);
 
-        // update pool info 
-        $.rewardsData.totalLocked += 1;
 
         // if validator is not in set -> add 
         if ($.validatorInfo.licenseInfo[msg.sender].ids.length == 0) {
             ValidatorSet storage vset = $.validatorInfo;
             vset.validators.push(msg.sender);
         }
-
 
         TokenSet storage tset = $.validatorInfo.licenseInfo[msg.sender];
         tset.ids.push(tokenId);
@@ -157,70 +161,14 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         _updatePosition(msg.sender);
 
         // update last seen epoch
+        $.epochData.lastEpochSeen = nowEpoch();
 
         emit LicenseLocked(msg.sender, tokenId);
-    }
-
-
-    /**
-     * @dev Update personal position based on pool RPS
-     */
-    function _updatePosition(
-        address validator
-    ) private {
-        Main storage $ = _getMainStorage();
-        Position storage position = $.rewardsData.position[validator];
-        position.rewardDebt = _getPendingRaw(validator);
-    }
-
-
-    function validatorPendingRewards(
-        address validator
-    ) public view returns (uint256) {
-        // show data as RPS change already applied
-        Main storage $ = _getMainStorage();
-
-        uint256 totalLock = $.rewardsData.totalLocked;
-        uint256 pending = pendingPoolRewards();
-        uint256 rewardPerShareChange = (pending * SHARE_DENOM) / totalLock;
-
-        uint256 newRPS;
-        if (rewardPerShareChange > 0) {
-            newRPS = $.rewardsData.RPS + rewardPerShareChange;
-        }
-
-        uint256 locked = $.validatorInfo.licenseInfo[validator].ids.length;
-        return (locked * newRPS) / SHARE_DENOM;
-
-    }
-
-    function validatorPendingRewardsRaw(
-        address validator
-    ) public view returns (uint256) {
-        Main storage $ = _getMainStorage();
-        Position storage position = $.rewardsData.position[validator];
-        uint256 accumulatedReward = position.accumulated;
-        uint256 pendingRaw = _getPendingRaw(validator);
-
-        if (pendingRaw <= position.rewardDebt) {
-            return accumulatedReward;
-        }
-
-        return pendingRaw - position.rewardDebt + accumulatedReward;
-    }
-
-    function _getPendingRaw(
-        address validator
-    ) public view returns (uint256) {
-        Main storage $ = _getMainStorage();
-        uint256 locked = $.validatorInfo.licenseInfo[validator].ids.length;
-        return (locked * $.rewardsData.RPS) / SHARE_DENOM;
     }
 
     function unlockLicense(uint256 tokenId) external {
         Main storage $ = _getMainStorage();
         TokenSet storage set = $.validatorInfo.licenseInfo[msg.sender];
-
 
         uint256 lockedAt = set.lockedAt[tokenId];
         if (lockedAt == 0) {
@@ -247,14 +195,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             _removeFromVSet(vset, msg.sender);
         }
 
-        // update pool info
-        $.rewardsData.totalLocked -= 1;
-
-
         // accumulate rewards
         Position storage position = $.rewardsData.position[msg.sender];
         position.accumulated += validatorPendingRewardsRaw(msg.sender);
-
 
         // update RPS
         _updateRPS($);
@@ -262,26 +205,31 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         // update position
         _updatePosition(msg.sender);
 
+        // update pool info
+        $.rewardsData.totalLocked -= 1;
+
         $.license.transferFrom(address(this), msg.sender, tokenId);
 
         emit LicenseUnlocked(msg.sender, tokenId);
     }
 
-    function _updateRPS(Main storage $) private {
-        uint256 newTotalLock = $.rewardsData.totalLocked;
-        uint256 pending = pendingPoolRewards();
+    function claim() external {
+        Main storage $ = _getMainStorage();
 
-        if (newTotalLock != 0) {
-            
-            uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
-            if (rewardPerShareChange > 0) {
-                $.rewardsData.RPS += rewardPerShareChange;
+        //console.log("");
+        //console.log("CLAIM BEGIN");
+        
+        _updateRPS($);
+        uint256 pending = validatorPendingRewardsRaw(msg.sender);
+        
+        //console.log("TO CLAIM:", pending);
 
-                // "flush" rewards
-                EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
-                rewardsData.rewardsUsed += pending;
-            }
+        if (pending > 0) {
+            $.rewardToken.transfer(msg.sender, pending);
         }
+        _updatePosition(msg.sender);
+
+        emit Claimed(msg.sender, pending);
     }
 
     //
@@ -446,6 +394,124 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return totalPending;
     }
 
+    function validatorPendingRewards(
+        address validator
+    ) public view returns (uint256) {
+        // show data as RPS change already applied
+        Main storage $ = _getMainStorage();
+
+        uint256 totalLock = $.rewardsData.totalLocked;
+        uint256 pending = pendingPoolRewards();
+        uint256 rewardPerShareChange = (pending * SHARE_DENOM) / totalLock;
+
+        console.log("");
+        console.log("DEBUG");
+        console.log("RPS: ", $.rewardsData.RPS);
+        console.log("pending: ", pending);
+        console.log("RPS change: ", rewardPerShareChange);
+
+        uint256 newRPS = $.rewardsData.RPS;
+        if (rewardPerShareChange > 0) {
+            newRPS += rewardPerShareChange;
+        }
+
+        Position storage position = $.rewardsData.position[validator];
+        uint256 raw = (getValidatorShare(validator) * newRPS) / (SHARE_DENOM * MAX_PERCENT);
+        
+        console.log("raw: ", raw);
+
+        uint256 accumulatedReward = position.accumulated;
+
+        if (raw <= position.rewardDebt) {
+            return accumulatedReward;
+        }
+        return raw - position.rewardDebt + accumulatedReward;
+    }
+
+    function validatorPendingRewardsRaw(
+        address validator
+    ) public view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        Position storage position = $.rewardsData.position[validator];
+        uint256 accumulatedReward = position.accumulated;
+        uint256 pendingRaw = _getPendingRaw(validator);
+
+        //console.log("Pend RAW internal:", pendingRaw);
+
+        if (pendingRaw <= position.rewardDebt) {
+            return accumulatedReward;
+        }
+
+        //console.log("Accumulated:", accumulatedReward);
+
+        return pendingRaw - position.rewardDebt + accumulatedReward;
+    }
+
+    function getValidatorShare(
+        address validator
+    ) public view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        uint256 locked = $.validatorInfo.licenseInfo[validator].ids.length;
+        return locked * MAX_PERCENT / $.rewardsData.totalLocked;
+    }
+
+    function getRewardDebt(
+        address validator
+    ) external view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        Position storage position = $.rewardsData.position[validator];
+        return position.rewardDebt;
+    }
+
+    function _getPendingRaw(
+        address validator
+    ) public view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        
+        //console.log("RPS", $.rewardsData.RPS);
+        //console.log("Share", getValidatorShare(validator));
+
+        return (getValidatorShare(validator) * $.rewardsData.RPS) / (SHARE_DENOM * MAX_PERCENT);
+    }
+
+    /**
+     * @dev Update personal position based on pool RPS
+     */
+    function _updatePosition(
+        address validator
+    ) private {
+        Main storage $ = _getMainStorage();
+        Position storage position = $.rewardsData.position[validator];
+        position.rewardDebt = _getPendingRaw(validator);
+    }
+
+
+    function _updateRPS(Main storage $) private {
+        uint256 newTotalLock = $.rewardsData.totalLocked;
+        uint256 pending = pendingPoolRewards();
+
+        //console.log("RPS");
+
+        if (newTotalLock != 0) {
+            uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
+            if (rewardPerShareChange > 0) {
+                //console.log("total lock: ", newTotalLock);
+                //console.log("pending: ", pending);
+                //console.log("_update RPS: ", $.rewardsData.RPS);
+                //console.log("_update RPS change: ", rewardPerShareChange);
+                $.rewardsData.RPS += rewardPerShareChange;
+
+                // "flush" rewards
+                EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
+                rewardsData.rewardsUsed += pending;
+            }
+        }
+    }
+
+    //
+    //    GETTERS
+    //
+
     function getTotalLocked() public view returns(uint256) {
         Main storage $ = _getMainStorage();
         return $.rewardsData.totalLocked;
@@ -456,6 +522,12 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         TokenSet storage tset = $.validatorInfo.licenseInfo[validator];
         return tset.ids.length;
     }
+
+    function getValidatorCount() external view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        return $.validatorInfo.validators.length;
+    }
+
 
     //
     //    UTILS
