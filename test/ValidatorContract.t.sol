@@ -124,21 +124,21 @@ contract ValidatorContractTest is Test {
         assertGt(poolRewards, vc.epochRewards(0));
     }
 
-    function v1Lock() public {
-        vm.startPrank(v1);
+    function vxLock(address who, uint256 token) public {
+        vm.startPrank(who);
 
         assertNotEq(address(vc), address(0));
-        l.approve(address(vc), 0);
+        l.approve(address(vc), token);
 
         vm.expectEmit(address(vc));
-        emit ValidatorContract.LicenseLocked(address(v1), 0);
+        emit ValidatorContract.LicenseLocked(address(who), token);
 
-        vc.lockLicense(0);
+        vc.lockLicense(token);
         vm.stopPrank();
     }
 
     function test_Lock() public {
-        v1Lock();
+        vxLock(v1, 0);
 
         address newOwner = l.ownerOf(0);
         assertEq(newOwner, address(vc));
@@ -148,6 +148,9 @@ contract ValidatorContractTest is Test {
 
         locked = vc.getValidatorLocked(v1);
         assertEq(locked, 1);
+
+        uint256 validators = vc.getValidatorCount();
+        assertEq(validators, 1);
 
         skip(1 minutes);
 
@@ -164,7 +167,7 @@ contract ValidatorContractTest is Test {
     }
 
     function testRevert_Unlock() public {
-        v1Lock();
+        vxLock(v1, 0);
 
         vm.startPrank(v1);
         vm.expectRevert(UnlockCooldown.selector);
@@ -174,7 +177,7 @@ contract ValidatorContractTest is Test {
     }
 
     function test_Unlock() public {
-        v1Lock();
+        vxLock(v1, 0);
         
         uint256 epochDuration = vc.epochDuration();
         skip(epochDuration);
@@ -184,10 +187,88 @@ contract ValidatorContractTest is Test {
         emit ValidatorContract.LicenseUnlocked(address(v1), 0);
         vc.unlockLicense(0);
         vm.stopPrank();
+
+        uint256 locked = vc.getTotalLocked();
+        assertEq(locked, 0);
+
+        locked = vc.getValidatorLocked(v1);
+        assertEq(locked, 0);
+
+        uint256 validators = vc.getValidatorCount();
+        assertEq(validators, 0);
     }
 
     function test_Claim() public {
-        v1Lock();
+        vxLock(v1, 0);
+
+        skip(30 minutes);
+
+        uint256 pending = vc.validatorPendingRewards(v1);
+        assertNotEq(pending, 0);
+
+        vm.startPrank(v1);
+
+        uint256 balance = rt.balanceOf(v1);
+        assertEq(balance, 0);
+
+        vm.expectEmit(address(vc));
+        emit ValidatorContract.Claimed(address(v1), pending);
+        console.log('pending to claim', pending);
+        vc.claim();
+        vm.stopPrank();
+
+        balance = rt.balanceOf(v1);
+        assertEq(balance, pending);
+        console.log('balance after claim:', balance);
+
+        // rewards to zero after claim (discrete) 
+        pending = vc.validatorPendingRewards(v1);
+        assertEq(pending, 0);
     }
 
+    function test_LockTwoUsers() public {
+        vxLock(v1, 0);
+        skip(30 minutes);
+
+        vxLock(v2, 3);
+
+        uint256 pendingV2 = vc.validatorPendingRewards(v2);
+        assertEq(pendingV2, 0);
+
+        skip(5 minutes);
+
+        uint256 pendingV1 = vc.validatorPendingRewards(v1);
+        uint256 pendingV1Raw = vc.validatorPendingRewardsRaw(v1);
+        assertNotEq(pendingV1, 0);
+
+        pendingV2 = vc.validatorPendingRewards(v2);
+        assertNotEq(pendingV2, 0);
+
+        uint256 v1debt = vc.getRewardDebt(v1);
+        uint256 v2debt = vc.getRewardDebt(v2);
+
+        // same share but v2 locked later
+        console.log("pending v1: ", pendingV1);
+        console.log("pending v2: ", pendingV2);
+        assertGt(pendingV1, pendingV2);
+
+
+        // claim does not affect second user
+        vm.prank(v1);
+        vc.claim();
+
+        uint256 balance = rt.balanceOf(v1);
+        assertEq(balance, pendingV1);
+        console.log("balance v1 claimed: ", balance);
+
+        uint256 pendingV1new = vc.validatorPendingRewards(v1);
+        assertEq(pendingV1new, 0);
+
+
+        // does not affect second user
+        uint256 pendingV2new = vc.validatorPendingRewards(v2);
+        console.log("pending v2 new: ", pendingV2new);
+        assertNotEq(pendingV2new, 0);
+        assertEq(pendingV2, pendingV2new);
+    }
 }
