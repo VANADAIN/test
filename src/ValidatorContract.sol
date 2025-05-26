@@ -54,14 +54,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //
     //    STORAGE
     //
-    struct Lock {
-        bool locked;
-        uint256 lockedAt;
-    }
-
     struct TokenSet {
         uint256[] ids;
-        mapping(uint256 tokenId => Lock) lock;
+        mapping(uint256 tokenId => uint256) lockedAt;
     }
 
     struct ValidatorSet {
@@ -123,7 +118,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         _grantRole(ADMIN, _admin);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN) {}
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyRole(ADMIN) {}
 
     //
     //    FUNCTIONS: NON-View
@@ -133,7 +130,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Main storage $ = _getMainStorage();
         $.license.safeTransferFrom(msg.sender, address(this), tokenId);
 
-        TokenSet storage set = $.validatorInfo.licenseInfo[msg.sender];
 
         // accumulate position rewards
         Position storage position = $.rewardsData.position[msg.sender];
@@ -142,22 +138,19 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         // update pool info 
         $.rewardsData.totalLocked += 1;
 
-        set.ids.push(tokenId);
-        set.lock[tokenId].locked = true;
-        set.lock[tokenId].lockedAt = block.timestamp;
+        // if validator is not in set -> add 
+        if ($.validatorInfo.licenseInfo[msg.sender].ids.length == 0) {
+            ValidatorSet storage vset = $.validatorInfo;
+            vset.validators.push(msg.sender);
+        }
+
+
+        TokenSet storage tset = $.validatorInfo.licenseInfo[msg.sender];
+        tset.ids.push(tokenId);
+        tset.lockedAt[tokenId] = block.timestamp;
 
         // update RPS
-        uint256 newTotalLock = $.rewardsData.totalLocked;
-        uint256 pending = pendingPoolRewards();
-        uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
-
-        if (rewardPerShareChange > 0) {
-            $.rewardsData.RPS += rewardPerShareChange;
-
-            // "flush" rewards
-            EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
-            rewardsData.rewardsUsed += pending;
-        }
+        _updateRPS($);
 
         // update position
         _updatePosition(msg.sender);
@@ -225,12 +218,13 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         Main storage $ = _getMainStorage();
         TokenSet storage set = $.validatorInfo.licenseInfo[msg.sender];
 
-        if (!set.lock[tokenId].locked) {
+
+        uint256 lockedAt = set.lockedAt[tokenId];
+        if (lockedAt == 0) {
             revert LicenseNotLocked(msg.sender, tokenId);
         }
 
         uint256 timePassed;
-        uint256 lockedAt = set.lock[tokenId].lockedAt;
         if (block.timestamp > lockedAt) {
             timePassed = block.timestamp - lockedAt;
         } else {
@@ -241,18 +235,56 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             revert UnlockCooldown();
         }
 
-        // TODO: delete from token set
+        // update locks 
+        set.lockedAt[tokenId] = 0;
+        _removeFromTSet(set, tokenId);
+
+        if (set.ids.length == 0) {
+            ValidatorSet storage vset = $.validatorInfo;
+            _removeFromVSet(vset, msg.sender);
+        }
+
+        // update pool info
+        $.rewardsData.totalLocked -= 1;
+
+        // accumulate rewards
+        Position storage position = $.rewardsData.position[msg.sender];
+        position.accumulated += validatorPendingRewardsRaw(msg.sender);
+
+        // update RPS
+        _updateRPS($);
+
+        // update position
+        _updatePosition(msg.sender);
+
 
         $.license.transferFrom(address(this), msg.sender, tokenId);
 
         emit LicenseUnlocked(msg.sender, tokenId);
     }
 
+    function _updateRPS(Main storage $) private {
+        uint256 newTotalLock = $.rewardsData.totalLocked;
+        uint256 pending = pendingPoolRewards();
+        uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
+
+        if (rewardPerShareChange > 0) {
+            $.rewardsData.RPS += rewardPerShareChange;
+
+            // "flush" rewards
+            EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
+            rewardsData.rewardsUsed += pending;
+        }
+    }
+
     //
     //    FUNCTIONS: ADMIN & Roles
     //
 
-    function setRewardAndStart(uint256 _firstEpochReward, uint256 _start) external onlyRole(SETTER) {
+    function setRewardAndStart(
+        uint256 _firstEpochReward,
+        uint256 _start
+    ) external onlyRole(SETTER) {
         NonZeroLib._nonZeroV(_firstEpochReward);
         NonZeroLib._nonZeroV(_start);
 
@@ -270,7 +302,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         $.epochData.firstEpochReward = _firstEpochReward;
     }
 
-    function setDecreasePercent(uint256 _decreasePercent) external onlyRole(SETTER) {
+    function setDecreasePercent(
+        uint256 _decreasePercent
+    ) external onlyRole(SETTER) {
         NonZeroLib._nonZeroV(_decreasePercent);
 
         Main storage $ = _getMainStorage();
@@ -287,7 +321,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
      * @notice Set epoch duration
      * @param _epochDuration - new epoch duration
      */
-    function setEpochDuration(uint256 _epochDuration) external onlyRole(SETTER) {
+    function setEpochDuration(
+        uint256 _epochDuration
+    ) external onlyRole(SETTER) {
         NonZeroLib._nonZeroV(_epochDuration);
         Main storage $ = _getMainStorage();
         $.epochData.epochDuration = _epochDuration;
@@ -295,15 +331,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit EpochDurationSet(_epochDuration);
     }
 
-    //
-    //    UTILS
-    //
-
-    function _getMainStorage() private pure returns (Main storage $) {
-        assembly {
-            $.slot := MAIN_STORAGE_LOCATION
-        }
-    }
 
     //
     //    FUNCTIONS: Rewards
@@ -315,7 +342,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
      * @param  epoch - epoch number
      * @return reward of X epoch
      */
-    function epochRewards(uint256 epoch) public view returns (uint256) {
+    function epochRewards(
+        uint256 epoch
+    ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         uint256 initial = $.epochData.firstEpochReward;
 
@@ -348,7 +377,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         return epochTimePassed(ce);
     }
 
-    function epochTimePassed(uint256 epoch) public view returns(uint256) {
+    function epochTimePassed(
+        uint256 epoch
+    ) public view returns(uint256) {
         Main storage $ = _getMainStorage();
 
         uint256 start = $.epochData.firstEpochStart + epoch * $.epochData.epochDuration;
@@ -359,7 +390,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
-    function pendingEpochRewards(uint256 epoch) public view returns (uint256) {
+    function pendingEpochRewards(
+        uint256 epoch
+    ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
         return currentRewardPerSecond() * epochTimePassed(epoch) - rewardsData.rewardsUsed;
@@ -376,5 +409,43 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
 
         return totalPending;
+    }
+
+    //
+    //    UTILS
+    //
+
+    function _getMainStorage() private pure returns (Main storage $) {
+        assembly {
+            $.slot := MAIN_STORAGE_LOCATION
+        }
+    }
+
+    function _removeFromTSet(
+        TokenSet storage set,
+        uint256 tokenId
+    ) private {
+        uint256 len = set.ids.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (set.ids[i] == tokenId) {
+                set.ids[i] = set.ids[len - 1];
+                set.ids.pop();
+                break;
+            }
+        } 
+    }
+
+    function _removeFromVSet(
+        ValidatorSet storage set,
+        address validator
+    ) private {
+        uint256 len = set.validators.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (set.validators[i] == validator) {
+                set.validators[i] = set.validators[len - 1];
+                set.validators.pop();
+                break;
+            }
+        } 
     }
 }
