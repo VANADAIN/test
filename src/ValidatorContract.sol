@@ -116,6 +116,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         _setRoleAdmin(ADMIN, SETTER);
 
         _grantRole(ADMIN, _admin);
+        _grantRole(SETTER, _admin);
     }
 
     function _authorizeUpgrade(
@@ -128,7 +129,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
     function lockLicense(uint256 tokenId) external {
         Main storage $ = _getMainStorage();
-        $.license.safeTransferFrom(msg.sender, address(this), tokenId);
+        $.license.transferFrom(msg.sender, address(this), tokenId);
 
 
         // accumulate position rewards
@@ -154,6 +155,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
         // update position
         _updatePosition(msg.sender);
+
+        // update last seen epoch
 
         emit LicenseLocked(msg.sender, tokenId);
     }
@@ -247,16 +250,17 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         // update pool info
         $.rewardsData.totalLocked -= 1;
 
+
         // accumulate rewards
         Position storage position = $.rewardsData.position[msg.sender];
         position.accumulated += validatorPendingRewardsRaw(msg.sender);
+
 
         // update RPS
         _updateRPS($);
 
         // update position
         _updatePosition(msg.sender);
-
 
         $.license.transferFrom(address(this), msg.sender, tokenId);
 
@@ -266,14 +270,17 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     function _updateRPS(Main storage $) private {
         uint256 newTotalLock = $.rewardsData.totalLocked;
         uint256 pending = pendingPoolRewards();
-        uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
 
-        if (rewardPerShareChange > 0) {
-            $.rewardsData.RPS += rewardPerShareChange;
+        if (newTotalLock != 0) {
+            
+            uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
+            if (rewardPerShareChange > 0) {
+                $.rewardsData.RPS += rewardPerShareChange;
 
-            // "flush" rewards
-            EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
-            rewardsData.rewardsUsed += pending;
+                // "flush" rewards
+                EpochRewards storage rewardsData = $.rewardsData.epochRewards[nowEpoch()];
+                rewardsData.rewardsUsed += pending;
+            }
         }
     }
 
@@ -331,6 +338,20 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit EpochDurationSet(_epochDuration);
     }
 
+    function setRewardToken(
+        address token
+    ) external onlyRole(SETTER) {
+        Main storage $ = _getMainStorage();
+        $.rewardToken = IERC20(token);
+    }
+
+    function setLicense(
+        address license
+    ) external onlyRole(SETTER) {
+        Main storage $ = _getMainStorage();
+        $.license = IERC721(license);
+    }
+
 
     //
     //    FUNCTIONS: Rewards
@@ -349,7 +370,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 initial = $.epochData.firstEpochReward;
 
         if (epoch == 0) return initial;
-        else return (initial * $.decreasePercent ** epoch) / (MAX_PERCENT ** epoch);
+        else return (initial * (MAX_PERCENT - $.decreasePercent) ** epoch) / (MAX_PERCENT ** epoch);
     }
 
     function nowEpoch() public view returns (uint256) {
@@ -363,13 +384,25 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
+    function epochDuration() public view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        return $.epochData.epochDuration;
+    }
+
     function currentFullRewards() public view returns (uint256) {
         return epochRewards(nowEpoch());
     }
 
     function currentRewardPerSecond() public view returns (uint256) {
         Main storage $ = _getMainStorage();
-        return currentFullRewards() / $.epochData.epochDuration;
+        return rewardPerSecond(nowEpoch());
+    }
+
+    function rewardPerSecond(
+        uint256 epoch
+    ) public view returns (uint256) {
+        Main storage $ = _getMainStorage();
+        return epochRewards(epoch) / $.epochData.epochDuration;
     }
 
     function currentEpochTimePassed() public view returns (uint256) {
@@ -385,6 +418,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 start = $.epochData.firstEpochStart + epoch * $.epochData.epochDuration;
         if (block.timestamp > start + $.epochData.epochDuration) {
             return $.epochData.epochDuration;
+        } else if (block.timestamp < start) {
+            return 0;
         } else {
             return block.timestamp - start;
         }
@@ -395,7 +430,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
-        return currentRewardPerSecond() * epochTimePassed(epoch) - rewardsData.rewardsUsed;
+        return rewardPerSecond(epoch) * epochTimePassed(epoch) - rewardsData.rewardsUsed;
     }
 
     function pendingPoolRewards() public view returns (uint256) {
@@ -404,11 +439,22 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 current = nowEpoch();
 
         uint256 totalPending;
-        for (uint256 i = lastSeen; i < current; i++) {
+        for (uint256 i = lastSeen; i <= current; i++) {
             totalPending += pendingEpochRewards(i);
         }
 
         return totalPending;
+    }
+
+    function getTotalLocked() public view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        return $.rewardsData.totalLocked;
+    }
+
+    function getValidatorLocked(address validator) public view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        TokenSet storage tset = $.validatorInfo.licenseInfo[validator];
+        return tset.ids.length;
     }
 
     //
