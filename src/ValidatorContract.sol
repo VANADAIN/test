@@ -9,7 +9,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {NonZeroLib} from "./lib/NonZeroLib.sol";
 
-import {console} from "forge-std/console.sol";
+// import {console} from "forge-std/console.sol";
 
 /**
  * @title  Validator Contract
@@ -28,6 +28,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     error InvalidStart(uint256 start);
     error InvalidPercent(uint256 percent);
     error UnlockCooldown();
+    error AtTheEnd();
+    error NoValidators();
 
     //
     //    EVENTS
@@ -216,18 +218,15 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     function claim() external {
         Main storage $ = _getMainStorage();
 
-        //console.log("");
-        //console.log("CLAIM BEGIN");
-        
         _updateRPS($);
         uint256 pending = validatorPendingRewardsRaw(msg.sender);
         
-        //console.log("TO CLAIM:", pending);
-
         if (pending > 0) {
             $.rewardToken.transfer(msg.sender, pending);
         }
         _updatePosition(msg.sender);
+
+        $.rewardsData.totalRewardsGiven += pending;
 
         emit Claimed(msg.sender, pending);
     }
@@ -235,6 +234,37 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     //
     //    FUNCTIONS: ADMIN & Roles
     //
+
+    function endEpoch() external onlyRole(ADMIN) {
+        Main storage $ = _getMainStorage();
+        uint256 epoch = nowEpoch();
+        uint256 timeLeft = epochTimeLeft(epoch);
+
+        if (timeLeft == 0) {
+            revert AtTheEnd();
+        }
+
+        // use timeframe shifting to update rewards
+        $.epochData.firstEpochStart -= timeLeft - 1;
+
+        // distribute rewards
+        address[] memory validators = $.validatorInfo.validators;
+        uint256 len = validators.length;
+
+        if (len == 0) {
+            revert NoValidators();
+        }
+
+        _updateRPS($);
+        for (uint256 i = 0; i < len; i++) {
+            uint256 pending = validatorPendingRewardsRaw(validators[i]);
+            if (pending > 0) {
+                $.rewardToken.transfer(validators[i], pending);
+                _updatePosition(validators[i]);
+                emit Claimed(validators[i], pending);
+            }
+        }
+    }
 
     function setRewardAndStart(
         uint256 _firstEpochReward,
@@ -253,7 +283,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             revert InvalidStart(_start);
         }
 
-        $.epochData.firstEpochStart = block.timestamp;
+        $.epochData.firstEpochStart = _start;
         $.epochData.firstEpochReward = _firstEpochReward;
     }
 
@@ -373,12 +403,28 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
     }
 
+    function epochTimeLeft(
+        uint256 epoch
+    ) public view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        return $.epochData.epochDuration - epochTimePassed(epoch);
+    }
+
     function pendingEpochRewards(
         uint256 epoch
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
-        return rewardPerSecond(epoch) * epochTimePassed(epoch) - rewardsData.rewardsUsed;
+
+        uint256 perSec = rewardPerSecond(epoch);
+        uint256 time = epochTimePassed(epoch);
+        if (time == 0) {
+            return 0;
+        }
+
+        if (perSec * time > rewardsData.rewardsUsed) {
+            return rewardPerSecond(epoch) * epochTimePassed(epoch) - rewardsData.rewardsUsed;
+        }
     }
 
     function pendingPoolRewards() public view returns (uint256) {
@@ -404,12 +450,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 pending = pendingPoolRewards();
         uint256 rewardPerShareChange = (pending * SHARE_DENOM) / totalLock;
 
-        console.log("");
-        console.log("DEBUG");
-        console.log("RPS: ", $.rewardsData.RPS);
-        console.log("pending: ", pending);
-        console.log("RPS change: ", rewardPerShareChange);
-
         uint256 newRPS = $.rewardsData.RPS;
         if (rewardPerShareChange > 0) {
             newRPS += rewardPerShareChange;
@@ -417,8 +457,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
         Position storage position = $.rewardsData.position[validator];
         uint256 raw = (getValidatorShare(validator) * newRPS) / (SHARE_DENOM * MAX_PERCENT);
-        
-        console.log("raw: ", raw);
 
         uint256 accumulatedReward = position.accumulated;
 
@@ -436,13 +474,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 accumulatedReward = position.accumulated;
         uint256 pendingRaw = _getPendingRaw(validator);
 
-        //console.log("Pend RAW internal:", pendingRaw);
-
         if (pendingRaw <= position.rewardDebt) {
             return accumulatedReward;
         }
-
-        //console.log("Accumulated:", accumulatedReward);
 
         return pendingRaw - position.rewardDebt + accumulatedReward;
     }
@@ -467,10 +501,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         address validator
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
-        
-        //console.log("RPS", $.rewardsData.RPS);
-        //console.log("Share", getValidatorShare(validator));
-
         return (getValidatorShare(validator) * $.rewardsData.RPS) / (SHARE_DENOM * MAX_PERCENT);
     }
 
@@ -490,15 +520,9 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 newTotalLock = $.rewardsData.totalLocked;
         uint256 pending = pendingPoolRewards();
 
-        //console.log("RPS");
-
         if (newTotalLock != 0) {
             uint256 rewardPerShareChange = (pending * SHARE_DENOM) / newTotalLock;
             if (rewardPerShareChange > 0) {
-                //console.log("total lock: ", newTotalLock);
-                //console.log("pending: ", pending);
-                //console.log("_update RPS: ", $.rewardsData.RPS);
-                //console.log("_update RPS change: ", rewardPerShareChange);
                 $.rewardsData.RPS += rewardPerShareChange;
 
                 // "flush" rewards
@@ -526,6 +550,22 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     function getValidatorCount() external view returns(uint256) {
         Main storage $ = _getMainStorage();
         return $.validatorInfo.validators.length;
+    }
+
+    function rewardsUsed(
+        uint256 epoch
+    ) external view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
+        return rewardsData.rewardsUsed;
+    }
+
+    function rewardsGiven(
+        uint256 epoch
+    ) external view returns(uint256) {
+        Main storage $ = _getMainStorage();
+        EpochRewards storage rewardsData = $.rewardsData.epochRewards[epoch];
+        return rewardsData.rewardsGiven;
     }
 
 
