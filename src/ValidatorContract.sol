@@ -213,7 +213,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         uint256 pending = validatorPendingRewardsRaw(msg.sender);
         
         if (pending > 0) {
-            $.rewardToken.transfer(msg.sender, pending);
+            $.rewardToken.safeTransfer(msg.sender, pending);
         }
         _updatePosition(msg.sender);
 
@@ -255,7 +255,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         for (uint256 i = 0; i < len; i++) {
             uint256 pending = validatorPendingRewardsRaw(validators[i]);
             if (pending > 0) {
-                $.rewardToken.transfer(validators[i], pending);
+                $.rewardToken.safeTransfer(validators[i], pending);
                 $.rewardsData.position[validators[i]].accumulated = 0;
                 _updatePosition(validators[i]);
                 claimed += pending;
