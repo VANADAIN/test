@@ -183,6 +183,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
 
         if (timePassed < epochDuration()) revert UnlockCooldown();
 
+        _updateRPS();
+        _accumulateRewards(msg.sender);
+
+        $.rewardsData.totalLocked -= 1;
+
         // update locks 
         set.lockedAt[tokenId] = 0;
         _removeFromTSet(msg.sender, tokenId);
@@ -191,13 +196,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             _removeFromVSet(msg.sender);
         }
 
-        _updateRPS();
-        _accumulateRewards(msg.sender);
         _updatePosition(msg.sender);
-
-        $.rewardsData.totalLocked -= 1;
         $.epochData.lastEpochSeen = nowEpoch();
-
         $.license.transferFrom(address(this), msg.sender, tokenId);
 
         emit LicenseUnlocked(msg.sender, tokenId);
