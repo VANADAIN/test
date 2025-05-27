@@ -9,8 +9,6 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {NonZeroLib} from "./lib/NonZeroLib.sol";
 
-// import {console} from "forge-std/console.sol";
-
 /**
  * @title  Validator Contract
  * @notice Smart-contract for managing validator's licenses and rewards
@@ -138,13 +136,17 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
      */
     function lockLicense(uint256 tokenId) external {
         Main storage $ = _getMainStorage();
+
         $.license.transferFrom(msg.sender, address(this), tokenId);
+
+        // update RPS
+        _updateRPS();
+
+        // accumulate position rewards
+        _accumulateRewards(msg.sender);
 
         // update pool info 
         $.rewardsData.totalLocked += 1;
-
-        // accumulate position rewards
-        $.rewardsData.position[msg.sender].accumulated += validatorPendingRewardsRaw(msg.sender);
 
         if ($.validatorInfo.licenseInfo[msg.sender].ids.length == 0) {
             ValidatorSet storage vset = $.validatorInfo;
@@ -154,9 +156,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         TokenSet storage tset = $.validatorInfo.licenseInfo[msg.sender];
         tset.ids.push(tokenId);
         tset.lockedAt[tokenId] = block.timestamp;
-
-        // update RPS
-        _updateRPS($);
 
         // update position
         _updatePosition(msg.sender);
@@ -192,12 +191,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             _removeFromVSet(msg.sender);
         }
 
-        _updateRPS($);
-
-        // accumulate rewards
-        Position storage position = $.rewardsData.position[msg.sender];
-        position.accumulated += validatorPendingRewardsRaw(msg.sender);
-
+        _updateRPS();
+        _accumulateRewards(msg.sender);
         _updatePosition(msg.sender);
 
         $.rewardsData.totalLocked -= 1;
@@ -214,7 +209,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     function claim() external {
         Main storage $ = _getMainStorage();
 
-        _updateRPS($);
+        _updateRPS();
         uint256 pending = validatorPendingRewardsRaw(msg.sender);
         
         if (pending > 0) {
@@ -255,12 +250,13 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
             revert NoValidators();
         }
 
-        _updateRPS($);
+        _updateRPS();
         uint256 claimed;
         for (uint256 i = 0; i < len; i++) {
             uint256 pending = validatorPendingRewardsRaw(validators[i]);
             if (pending > 0) {
                 $.rewardToken.transfer(validators[i], pending);
+                $.rewardsData.position[validators[i]].accumulated = 0;
                 _updatePosition(validators[i]);
                 claimed += pending;
                 emit Claimed(validators[i], pending);
@@ -373,7 +369,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         uint256 initial = $.epochData.firstEpochReward;
-
         if (epoch == 0) return initial;
         else return (initial * (MAX_PERCENT - $.decreasePercent) ** epoch) / (MAX_PERCENT ** epoch);
     }
@@ -514,7 +509,6 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     function validatorPendingRewards(
         address validator
     ) public view returns (uint256) {
-        // show data as RPS change already applied
         Main storage $ = _getMainStorage();
 
         uint256 rewardPerShareChange = (pendingPoolRewards() * SHARE_DENOM) / $.rewardsData.totalLocked;
@@ -524,7 +518,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         }
 
         Position storage position = $.rewardsData.position[validator];
-        uint256 raw = (getValidatorShare(validator) * newRPS) / (SHARE_DENOM * MAX_PERCENT);
+        uint256 raw = (getValidatorLock(validator) * newRPS) / (SHARE_DENOM * MAX_PERCENT);
         uint256 accumulatedReward = position.accumulated;
 
         if (raw <= position.rewardDebt) {
@@ -538,6 +532,7 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
         Position storage position = $.rewardsData.position[validator];
+
         uint256 accumulatedReward = position.accumulated;
         uint256 pendingRaw = _getPendingRaw(validator);
 
@@ -553,12 +548,11 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
      * @param  validator - address of validator
      * @return validator share
      */
-    function getValidatorShare(
+    function getValidatorLock(
         address validator
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
-        uint256 locked = $.validatorInfo.licenseInfo[validator].ids.length;
-        return locked * MAX_PERCENT / $.rewardsData.totalLocked;
+        return $.validatorInfo.licenseInfo[validator].ids.length;
     }
 
     /**
@@ -577,7 +571,16 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         address validator
     ) public view returns (uint256) {
         Main storage $ = _getMainStorage();
-        return (getValidatorShare(validator) * $.rewardsData.RPS) / (SHARE_DENOM * MAX_PERCENT);
+        return (getValidatorLock(validator) * $.rewardsData.RPS) / (SHARE_DENOM * MAX_PERCENT);
+    }
+
+    function _accumulateRewards(
+        address validator
+    ) private {
+        Main storage $ = _getMainStorage();
+        if (getValidatorLock(validator) != 0) {
+            $.rewardsData.position[validator].accumulated = validatorPendingRewardsRaw(validator);
+        }
     }
 
     /**
@@ -594,7 +597,8 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
     /**
      * @dev Update RPS based on pending rewards
      */
-    function _updateRPS(Main storage $) private {
+    function _updateRPS() private {
+        Main storage $ = _getMainStorage();
         uint256 newTotalLock = $.rewardsData.totalLocked;
         uint256 pending = pendingPoolRewards();
 
@@ -717,3 +721,4 @@ contract ValidatorContract is Initializable, UUPSUpgradeable, AccessControlUpgra
         } 
     }
 }
+
